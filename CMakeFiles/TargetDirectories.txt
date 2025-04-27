@@ -1,0 +1,3 @@
+/home/gawi/fast-compress/CMakeFiles/FastCompress.dir
+/home/gawi/fast-compress/CMakeFiles/edit_cache.dir
+/home/gawi/fast-compress/CMakeFiles/rebuild_cache.dir

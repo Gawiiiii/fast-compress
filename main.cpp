@@ -1,6 +1,10 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
+#include <random>
+#include <memory>
+#include <unordered_map>
 #include "compress.h"
 #include "util.h"
 
@@ -26,17 +30,38 @@ class MemPage {
   }
 };
 
+//compressor factory function: algorithm name -> corresponding compressor
+std::unique_ptr<LosslessCompressor> createCompressor(const std::string& algorithm) {
+  if (algorithm == "lz4hc") {
+    return std::make_unique<LZ4HC>();
+  } else if (algorithm == "lz4") {
+    return std::make_unique<LZ4>();
+  } else if (algorithm == "lzo") {
+    return std::make_unique<LZO>();
+  } else if (algorithm == "lzo-rle") {
+    return std::make_unique<LZORLE>();
+  } else if (algorithm == "zstd") {
+    return std::make_unique<ZSTD>();
+  } else if (algorithm == "842") {
+    return std::make_unique<Deflate842>();
+  } else {
+    throw std::invalid_argument("Unknown compression algorithm: " + algorithm);
+  }
+}
+
 int main(int argc, char* argv[]) {
   if(argc < 3) {
     std::cerr << "[USAGE]: file path, block size [n pages], number of iteration,"
                  " [page random shuffle, false by default]" << std::endl;
     exit(EXIT_FAILURE);
   }
+
   std::string path = std::string(argv[1]);
   size_t block_size = std::stoul(argv[2]) * kPageSize;
   size_t niteration = std::stoul(argv[3]);
   bool page_shuffle = false;
-  if(argc >= 5) page_shuffle = std::stoi(argv[4]);
+  page_shuffle = argc >=5 ? std::stoi(argv[4]) : false;//not use page shuffle as defualt
+  std::string algorithm = argc >=6 ? argv[5] : "zstd";//use zstd as default
 
   PinningMap pin;
   pin.pinning_thread(0, 0, pthread_self());
@@ -53,10 +78,17 @@ int main(int argc, char* argv[]) {
   fin.read((char*) origin, size);
   std::cout << "[INFO]: file size " << size << ", number of blocks " << size / block_size << std::endl;
 
-  if(page_shuffle) std::random_shuffle((MemPage*) origin, (MemPage*) ((uintptr_t) origin + size - kPageSize));
+  if(page_shuffle) {
+    std::mt19937 generator(std::random_device{}());
+    std::shuffle((MemPage*) origin, (MemPage*) ((uintptr_t) origin + size - kPageSize), generator);
+  }
 
-  LosslessCompressor* compressor = new ZSTD();
+//  LosslessCompressor* compressor = new ZSTD();
 //  LosslessCompressor* compressor = new LZ4();
+
+  //use factory function to choose commpressor based on input
+  std::unique_ptr<LosslessCompressor> compressor = createCompressor(algorithm);
+
   size_t comp_block_size = block_size * 2;
   void* compressed = aligned_alloc(kPageSize, comp_block_size * size / block_size);
   size_t* compressed_size = (size_t*) calloc(size / block_size, sizeof(size_t));
@@ -64,12 +96,15 @@ int main(int argc, char* argv[]) {
   size_t total_compressed = 0;
   Timer timer;
   timer.start();
-  for(size_t i = 0; i < niteration; i++) {
-    for(size_t bid = 0; bid < nblock; bid++) {
+
+  //double loop compression
+  for(size_t i = 0; i < niteration; i++) {//first loop: compression level
+    for(size_t bid = 0; bid < nblock; bid++) {//second loop: compress each block
       void* dst = (char*) compressed + bid * comp_block_size;
       void* src = (char*) origin + bid * block_size;
       size_t res = compressor->compress(dst, comp_block_size, src, block_size);
-      total_compressed += res, compressed_size[bid] = res;
+      total_compressed += res;
+      compressed_size[bid] = res;
     }
   }
   long drt = timer.duration_us();
@@ -81,6 +116,8 @@ int main(int argc, char* argv[]) {
             << ", compressed size / original size " << 1 / ratio << std::endl;
 
   timer.start();
+
+  //double loop decompression
   for(size_t i = 0; i < niteration; i++) {
     for(size_t bid = 0; bid < nblock; bid++) {
       void* src = (char*) compressed + bid * comp_block_size;
